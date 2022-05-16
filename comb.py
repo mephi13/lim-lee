@@ -3,6 +3,7 @@ from typing import List, Optional
 from random import randrange
 from blessed import Terminal
 from sympy import randprime, isprime, nextprime
+from Crypto.PublicKey import ECC
 import math
 import functools
 import operator
@@ -42,32 +43,42 @@ class CombFastExponentiation:
         self.b_leading = self.a - self.b * (self.v - 1)
         assert self._debinarize(self._binarize(4321, 32)) == 4321
 
-    def precompute(self, g, p):
+    def precompute(self, g, p=None):
         # 0 <= j <= v
         # 1 <= u <= 2^h
         # G[j][u] = (G[j-1][u])^(2^b) = (G[0][u])^(2^(jb))
         # I_j,k = sum_i=0^h-1 (e_i,j,k)*2^i
 
-        if isinstance(g, int):
-            r = []
-            # generate empty array G
-            G = [[1 for y in range(0, 2 ** self.h)] for x in range(0, self.v + 1)]
+        r = []
+        # generate empty array G
+        G = [[1 for y in range(0, 2 ** self.h)] for x in range(0, self.v + 1)]
 
-            # precalculate g^(2a)
-            two_to_a = pow(2, (self.a), p)
-            # Calculate r values
-            for i in range(self.h):
+        # precalculate 2^a
+        two_to_a = pow(2, (self.a), p) if p else pow(2, (self.a))
+
+        # Calculate r values
+        for i in range(self.h):
+            if isinstance(g, int):
                 r.append(pow(g, pow(two_to_a, i, p), p))
-            print(r)
-            # Populate array G
-            for u in range(1, 2 ** self.h):
-                # handle base case G[0][u]
-                u_binary = self._binarize(u, self.h)
+            elif isinstance(g, ECC.EccPoint):
+                r.append( g * pow(two_to_a, i) )
 
+        # Populate array G
+        for u in range(1, 2 ** self.h):
+
+            # handle base case G[0][u]
+            u_binary = self._binarize(u, self.h)
+
+            if isinstance(g, int):
                 G[0][u] = functools.reduce(operator.mul, map(lambda x,y: x ** y, r, u_binary)) % p
+            elif isinstance(g, ECC.EccPoint):
+                G[0][u] = functools.reduce(operator.add, map(lambda x,y: x * y, r, u_binary))
 
-                for j in range(1, self.v + 1):
+            for j in range(1, self.v):
+                if isinstance(g, int):
                     G[j][u] = pow((G[j-1][u]), 2 ** b, p) 
+                elif isinstance(g, ECC.EccPoint):
+                    G[j][u] = (G[j-1][u]) * (2 ** b) 
 
         self.G = G
         self.g = g
@@ -105,16 +116,28 @@ class CombFastExponentiation:
 
     def fast_exponentiation(self, e):
         # set R = 1
-        R = 1
         e_blocked = self.divide_exponent_into_block(e)
 
-        for k in range(self.b - 1, 0 - 1, -1):
-            R = pow(R, 2, p)
-            for j in range(self.v - 1, 0 - 1, -1):
-                I_jk = (self.get_index(e_blocked, j, k))
-                print(j, k, I_jk)
-                if I_jk > 0:
-                    R = (R * self.G[j][I_jk]) % p
+        if isinstance(self.g, int):
+            R = 1
+            p = self.p
+            e = e % p
+            for k in range(self.b - 1, 0 - 1, -1):
+                R = pow(R, 2, p)
+                for j in range(self.v - 1, 0 - 1, -1):
+                    I_jk = (self.get_index(e_blocked, j, k))
+                    if I_jk > 0:
+                        R = (R * self.G[j][I_jk]) % p
+
+        elif isinstance(self.g, ECC.EccPoint):
+            R = ECC.EccPoint(0, 0, curve="NIST P-521") # neutral element of addition 
+            for k in range(self.b - 1, 0 - 1, -1):
+                R = R.double()
+                for j in range(self.v - 1, 0 - 1, -1):
+                    I_jk = (self.get_index(e_blocked, j, k))
+
+                    if I_jk > 0:
+                        R = (R + self.G[j][I_jk]) 
         return R
 
     def get_index(self, e_blocked, j, k):
@@ -158,7 +181,7 @@ def calculate_optimal_parameters(S, l):
     opt_a = 0
     opt_b = 0
     opt_cost = None
-    opt_cost = None
+    opt_scost = None
     for a in range(1, l+1):
         for b in range(1, a+1):
             h = math.ceil(l/a)
@@ -169,7 +192,7 @@ def calculate_optimal_parameters(S, l):
 
             # we assume that cost for squating and multiplication is the same
             squaring_cost = b - 1
-            multiplication_cost = (2 ** (h - 1) - 1) / (2 ** (h - 1)) * (a - a_last) + (2 ** (h) - 1) / (2 ** (h)) * a_last - 1
+            multiplication_cost = ((2 ** (h - 1)) - 1) / (2 ** (h - 1)) * (a - a_last) + ((2 ** (h)) - 1) / (2 ** (h)) * a_last - 1
 
             cost = squaring_cost + multiplication_cost
 
@@ -203,18 +226,20 @@ def gen_strong_prime(min, max, randomize_bin_len = False, p =None, p_t = None):
 
     return (p, p_t)
 
-print(CombFastExponentiation(13, 12, 12 ,12))
-a, b, cost, scost = calculate_optimal_parameters(100, 64)
-print(a, b, cost, scost)
-instance= CombFastExponentiation(a, b,64, 100)
-
-p, _ = gen_strong_prime(0, 64)
+l = 64
+p, _ = gen_strong_prime(0, l)
 g = 3
-e = 321581
+e = randrange(0, 2 ** l) 
+S = 100
+
+a, b, cost, scost = calculate_optimal_parameters(S, l)
+print(a, b, cost, scost)
+instance= CombFastExponentiation(a, b, l, S)
+
 print(g, p)
 instance.precompute(g, p)
 print(instance)
-instance.print_G(p)
+print(len(instance.G) * (len(instance.G[0]) - 1)) 
 e_blocked = instance.divide_exponent_into_block(e)
 
 for i in e_blocked:
@@ -223,3 +248,13 @@ for i in e_blocked:
 
 print(g, e, instance.fast_exponentiation(e))
 print(pow(g, e, p))
+
+curve = ECC.generate(curve="NIST P-521")
+basepoint = curve.pointQ
+
+instance.precompute(basepoint)
+result = instance.fast_exponentiation(e)
+
+print(result.xy)
+
+print((basepoint * e) == result)
