@@ -5,6 +5,8 @@ from blessed import Terminal
 from sympy import randprime, isprime, nextprime
 from Crypto.PublicKey import ECC
 import math
+import argparse
+import time
 import functools
 import operator
 
@@ -51,7 +53,7 @@ class CombFastExponentiation:
 
         r = []
         # generate empty array G
-        G = [[1 for y in range(0, 2 ** self.h)] for x in range(0, self.v + 1)]
+        G = [[0 for y in range(0, 2 ** self.h)] for x in range(0, self.v)]
 
         # precalculate 2^a
         two_to_a = pow(2, (self.a), p) if p else pow(2, (self.a))
@@ -117,6 +119,8 @@ class CombFastExponentiation:
     def fast_exponentiation(self, e):
         # set R = 1
         e_blocked = self.divide_exponent_into_block(e)
+        squarings = 0
+        multiplications = 0
 
         if isinstance(self.g, int):
             R = 1
@@ -124,28 +128,32 @@ class CombFastExponentiation:
             e = e % p
             for k in range(self.b - 1, 0 - 1, -1):
                 R = pow(R, 2, p)
+                squarings += 1
                 for j in range(self.v - 1, 0 - 1, -1):
                     I_jk = (self.get_index(e_blocked, j, k))
                     if I_jk > 0:
                         R = (R * self.G[j][I_jk]) % p
+                        multiplications += 1
 
         elif isinstance(self.g, ECC.EccPoint):
             R = ECC.EccPoint(0, 0, curve="NIST P-521") # neutral element of addition 
             for k in range(self.b - 1, 0 - 1, -1):
                 R = R.double()
+                squarings += 1
                 for j in range(self.v - 1, 0 - 1, -1):
                     I_jk = (self.get_index(e_blocked, j, k))
 
                     if I_jk > 0:
                         R = (R + self.G[j][I_jk]) 
-        return R
+                        multiplications += 1
+        return R, squarings, multiplications
 
     def get_index(self, e_blocked, j, k):
         out = []
         for i in range(0, self.h):
             if i == self.h-1 and j == self.v_last - 1:
                 width = self.b_last
-            if j == self.v - 1:
+            elif j == self.v - 1:
                 width = self.b_leading
             else:
                 width = self.b
@@ -189,14 +197,15 @@ def calculate_optimal_parameters(S, l):
             a_last = l - a * (h - 1)
             v_last = math.ceil(a_last/b)
             b_last = a_last - b * (v_last - 1)
+            b_leading = a - b * (v - 1)
 
-            # we assume that cost for squating and multiplication is the same
+            # we assume that cost for squaring and multiplication is the same
             squaring_cost = b - 1
-            multiplication_cost = ((2 ** (h - 1)) - 1) / (2 ** (h - 1)) * (a - a_last) + ((2 ** (h)) - 1) / (2 ** (h)) * a_last - 1
+            multiplication_cost = (((2 ** (h - 1)) - 1) / (2 ** (h - 1))) * (a - a_last) + (((2 ** (h)) - 1) / (2 ** (h))) * (a_last - 1)
 
             cost = squaring_cost + multiplication_cost
 
-            storage_cost = ((2 ** h) - 1) * v_last + ((2 ** (h - 1)) - 1) * (v - v_last)
+            storage_cost = ((2 ** h) - 1) * v + ((2 ** (h - 1)) - 1) * (v - v_last)
 
             if storage_cost > S:
                 continue
@@ -208,53 +217,126 @@ def calculate_optimal_parameters(S, l):
 
     return opt_a, opt_b, opt_cost, opt_scost
 
-def gen_strong_prime(min, max, randomize_bin_len = False, p =None, p_t = None):
-    if p:
-        p_t = (p - 1) // 2
-    elif p_t:
-        p =  2*p_t + 1
+def gen_prime(min, max):
+    p = 0
+    min_v = min 
+    max_v = max 
+    while not isprime(p):
+        p = randprime(2 ** min_v, 2 ** max_v)
+    return p
+
+def print_blocks(blocks):
+    t = Terminal()
+    l = len(str(blocks[0]))
+    l2 = len(str(blocks[0][-1]))
+    l3 = len(str(blocks[0][0]))
+    l4 = len(str(blocks[-1][-1]))
+    block_a ="\n<" + "-" * ((l-3)//2) + t.red("a") + "-" * ((l-2)//2) +">\n"
+    block_b_le ="<" + "-" * ((l2-5)//2) + t.green("b_le") + "-" * ((l2-4)//2) +">"
+    block_b = (l - t.length(block_b_le) - l3 - 1) * " " + "<" + "-" * ((l3-1)//2) + t.green("b") + "-" * ((l3-2)//2) +">\n"
+
+    blocks_str = block_a + block_b_le + block_b
+    for i, row in enumerate(blocks):
+        row.reverse()
+        if len(str(row)) == len(str(blocks[0])) and i != len(blocks) - 1:
+            blocks_str += str(row)
+            if i == 0:
+                blocks_str += "↑" + "\n"
+            elif i == len(blocks) //2 :
+                blocks_str += term.blue("h") + "\n"
+            else:
+                blocks_str += "|" + "\n"
+        else:
+            empty = (len(str(blocks[0])) - len(str(row))) 
+            blocks_str += " " * empty + str(row)
+            blocks_str += "↓" + "\n"
+            blocks_str += empty * " " + "<" + "-" * ((l4-5)//2) + t.green("b_la") + "-" * ((l4-4)//2) +">\n"
+            blocks_str += empty * " " + "<" + "-" * ((l-8 - empty)//2) + t.red("a_last") + "-" * ((l-7 - empty)//2) +">\n"
+    return blocks_str
+
+if __name__== "__main__":
+    parser = argparse.ArgumentParser(description='Lim/Lee comb exponentiation algorhitm for EC and integers.')
+    parser.add_argument("--length", "-l", type=int, help="Bit length of exponent", default=128)
+    parser.add_argument("--integer", "-i", action="count", help="Calculate exponentiation on integers (EC is default)", default=0)
+    parser.add_argument("--storage","-S", type=int, help="Maximum stored elements", default=100)
+    parser.add_argument("--generator", "-g", type=int,help="Generator for integer calculations", default=None)
+    parser.add_argument("--exponent", "-e", type=int,help="Exponent", default=None)
+    parser.add_argument("--plength", "-p", type=int,help="Bit length of prime defining Zp for integer calculations", default=128)
+
+    args = parser.parse_args()
+
+    calc_ec = not args.integer
+    if calc_ec:
+        curve = ECC.generate(curve="NIST P-521")
+        G = curve.pointQ
+ 
+    e = args.exponent if args.exponent else randrange(1, 2 ** args.length) 
+    l = e.bit_length()
+    p = gen_prime(0, args.plength)
+    g = args.generator if args.generator else randrange(0, 2 ** randrange(1, l)) 
+   
+    S = args.storage
+
+    term = Terminal()
+
+    print("-" * term.width)
+    print(f"{term.bold_underline('Stage 1')}")
+    print(f"Calculating optimal a, b parameters for given S={term.brown(str(S))} and l={term.blue(str(l))}")
+    a, b, cost, scost = calculate_optimal_parameters(S, l)
+    print("." * term.width)
+    print(f"a={term.red(str(a))}")
+    print(f"b={term.green(str(b))}")
+    print(f"operation cost={term.yellow(str(cost))}")
+    print(f"storage cost={term.brown(str(scost))}")
+
+    print("-" * term.width)
+    print(f"{term.bold_underline('Stage 2')}")
+
+    if not calc_ec:
+        print(f"Precomputing multiples of generator g={term.orange(str(g))} with field size p={term.purple(str(p))}")  
     else:
-        p = 0
-        min_v = min - 2
-        max_v = max - 2
-        while not isprime(p):
-            if randomize_bin_len:
-                min_v = randrange(min - 2,max - 2)
-                max_v = min_v + 1
-            p_t = randprime(2 ** min_v, 2 ** max_v)
-            p = 2*p_t + 1
+        print(f"Precomputing multiples of basepoing G={term.orange(str(G.xy))} of curve {curve.curve}")  
 
-    return (p, p_t)
 
-l = 64
-p, _ = gen_strong_prime(0, l)
-g = 3
-e = randrange(0, 2 ** l) 
-S = 100
+    comb= CombFastExponentiation(a, b, l, S)
+    print("." * term.width)
 
-a, b, cost, scost = calculate_optimal_parameters(S, l)
-print(a, b, cost, scost)
-instance= CombFastExponentiation(a, b, l, S)
+    start = time.time()
+    if not calc_ec:
+        comb.precompute(g, p)
+    else:
+        comb.precompute(G)
+    stop = time.time() - start
 
-print(g, p)
-instance.precompute(g, p)
-print(instance)
-print(len(instance.G) * (len(instance.G[0]) - 1)) 
-e_blocked = instance.divide_exponent_into_block(e)
+    print(f"Calculated parameters for precomputing: {term.bold_red(str(comb))}")
+    
+    storage = functools.reduce(lambda x,y: x + len(y), comb.G, 0) 
+    print(f"Calculated number of stored elements: {term.brown_bold(str(storage))}")
+    print(f"Precomputing time: {term.yellow(str(round(stop, 5)))}")
 
-for i in e_blocked:
-    i.reverse()
-    print(i)
+    print("-" * term.width)
+    print(f"{term.bold_underline('Stage 3')}")
+    if not calc_ec:
+        print(f"Finding the value g^e for g={term.orange(str(g))} and e={term.pink(str(e))}")  
+    else:
+        print(f"Finding the value G*e for G={term.orange(str(G.xy))} and e={term.pink(str(e))}")  
+    print("." * term.width)
 
-print(g, e, instance.fast_exponentiation(e))
-print(pow(g, e, p))
+    e_blocks = comb.divide_exponent_into_block(e)
+    print(f"Representation of the exponent in blocks: ")
+    print(term.bold(print_blocks(e_blocks)))
 
-curve = ECC.generate(curve="NIST P-521")
-basepoint = curve.pointQ
+    start = time.time()
+    result, s, m = comb.fast_exponentiation(e)
+    stop = time.time() - start
 
-instance.precompute(basepoint)
-result = instance.fast_exponentiation(e)
+    print(f"Online Calculations time: {term.yellow(str(round(stop, 10)))}")
+    print(f"Squarings: {term.yellow(str(s))}")
+    print(f"Multiplications: {term.yellow(str(m))}")
 
-print(result.xy)
-
-print((basepoint * e) == result)
+    if not calc_ec:
+        print(f"Result: {term.underline_bold_green(str(result))}") if pow(g, e, p) == result else print(f"Wrong result: {term.underline_bold_red(str(result))}") 
+        print(f"{result} == {pow(g, e, p)}? " + str(pow(g, e, p) == result))
+    else:
+        print(f"Result: {term.underline_bold_green(str(result.xy))}") if G * e == result else print(f"Wrong result: {term.underline_bold_red(str(result.xy))}") 
+        print(f"{result.xy} == {(G * e).xy}? " + str((G * e) == result))
